@@ -31,6 +31,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "bio.h"
 
 #include <sys/time.h>
 #include <unistd.h>
@@ -1338,8 +1339,8 @@ void disklessLoadRestoreBackups(redisDb *backup, int restore, int empty_db_flags
             server.db[i] = backup[i];
         }
     } else {
-        /* Delete. */
-        emptyDbGeneric(backup,-1,empty_db_flags,replicationEmptyDbCallback);
+        /* Delete (Pass EMPTYDB_BACKUP in order to avoid firing module events) . */
+        emptyDbGeneric(backup,-1,empty_db_flags|EMPTYDB_BACKUP,replicationEmptyDbCallback);
         for (int i=0; i<server.dbnum; i++) {
             dictRelease(backup[i].dict);
             dictRelease(backup[i].expires);
@@ -1353,7 +1354,7 @@ void disklessLoadRestoreBackups(redisDb *backup, int restore, int empty_db_flags
 void readSyncBulkPayload(connection *conn) {
     char buf[4096];
     ssize_t nread, readlen, nwritten;
-    int use_diskless_load;
+    int use_diskless_load = useDisklessLoad();
     redisDb *diskless_load_backup = NULL;
     int empty_db_flags = server.repl_slave_lazy_flush ? EMPTYDB_ASYNC :
                                                         EMPTYDB_NO_FLAGS;
@@ -1410,19 +1411,18 @@ void readSyncBulkPayload(connection *conn) {
             server.repl_transfer_size = 0;
             serverLog(LL_NOTICE,
                 "MASTER <-> REPLICA sync: receiving streamed RDB from master with EOF %s",
-                useDisklessLoad()? "to parser":"to disk");
+                use_diskless_load? "to parser":"to disk");
         } else {
             usemark = 0;
             server.repl_transfer_size = strtol(buf+1,NULL,10);
             serverLog(LL_NOTICE,
                 "MASTER <-> REPLICA sync: receiving %lld bytes from master %s",
                 (long long) server.repl_transfer_size,
-                useDisklessLoad()? "to parser":"to disk");
+                use_diskless_load? "to parser":"to disk");
         }
         return;
     }
 
-    use_diskless_load = useDisklessLoad();
     if (!use_diskless_load) {
         /* Read the data from the socket, store it to a file and search
          * for the EOF. */
@@ -1524,7 +1524,6 @@ void readSyncBulkPayload(connection *conn) {
     /* We need to stop any AOF rewriting child before flusing and parsing
      * the RDB, otherwise we'll create a copy-on-write disaster. */
     if (server.aof_state != AOF_OFF) stopAppendOnly();
-    signalFlushedDb(-1);
 
     /* When diskless RDB loading is used by replicas, it may be configured
      * in order to save the current DB instead of throwing it away,
@@ -1532,10 +1531,15 @@ void readSyncBulkPayload(connection *conn) {
     if (use_diskless_load &&
         server.repl_diskless_load == REPL_DISKLESS_LOAD_SWAPDB)
     {
+        /* Create a backup of server.db[] and initialize to empty
+         * dictionaries */
         diskless_load_backup = disklessLoadMakeBackups();
-    } else {
-        emptyDb(-1,empty_db_flags,replicationEmptyDbCallback);
     }
+    /* We call to emptyDb even in case of REPL_DISKLESS_LOAD_SWAPDB
+     * (Where disklessLoadMakeBackups left server.db empty) because we
+     * want to execute all the auxiliary logic of emptyDb (Namely,
+     * fire module events) */
+    emptyDb(-1,empty_db_flags,replicationEmptyDbCallback);
 
     /* Before loading the DB into memory we need to delete the readable
      * handler, otherwise it will get called recursively since
@@ -1616,14 +1620,20 @@ void readSyncBulkPayload(connection *conn) {
             killRDBChild();
         }
 
+        /* Rename rdb like renaming rewrite aof asynchronously. */
+        int old_rdb_fd = open(server.rdb_filename,O_RDONLY|O_NONBLOCK);
         if (rename(server.repl_transfer_tmpfile,server.rdb_filename) == -1) {
             serverLog(LL_WARNING,
                 "Failed trying to rename the temp DB into %s in "
                 "MASTER <-> REPLICA synchronization: %s",
                 server.rdb_filename, strerror(errno));
             cancelReplicationHandshake();
+            if (old_rdb_fd != -1) close(old_rdb_fd);
             return;
         }
+        /* Close old rdb asynchronously. */
+        if (old_rdb_fd != -1) bioCreateBackgroundJob(BIO_CLOSE_FILE,(void*)(long)old_rdb_fd,NULL,NULL);
+
         if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_REPLICATION) != C_OK) {
             serverLog(LL_WARNING,
                 "Failed trying to load the MASTER synchronization "
@@ -2392,6 +2402,10 @@ void replicationUnsetMaster(void) {
     moduleFireServerEvent(REDISMODULE_EVENT_REPLICATION_ROLE_CHANGED,
                           REDISMODULE_EVENT_REPLROLECHANGED_NOW_MASTER,
                           NULL);
+
+    /* Restart the AOF subsystem in case we shut it down during a sync when
+     * we were still a slave. */
+    if (server.aof_enabled && server.aof_state == AOF_OFF) restartAOFAfterSYNC();
 }
 
 /* This function is called when the slave lose the connection with the
@@ -2429,9 +2443,6 @@ void replicaofCommand(client *c) {
             serverLog(LL_NOTICE,"MASTER MODE enabled (user request from '%s')",
                 client);
             sdsfree(client);
-            /* Restart the AOF subsystem in case we shut it down during a sync when
-             * we were still a slave. */
-            if (server.aof_enabled && server.aof_state == AOF_OFF) restartAOFAfterSYNC();
         }
     } else {
         long port;
