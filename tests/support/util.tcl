@@ -99,11 +99,27 @@ proc wait_for_ofs_sync {r1 r2} {
     }
 }
 
-proc wait_for_log_message {srv_idx pattern last_lines maxtries delay} {
+# count current log lines in server's stdout
+proc count_log_lines {srv_idx} {
+    set _ [exec wc -l < [srv $srv_idx stdout]]
+}
+
+# verify pattern exists in server's sdtout after a certain line number
+proc verify_log_message {srv_idx pattern from_line} {
+    set lines_after [count_log_lines]
+    set lines [expr $lines_after - $from_line]
+    set result [exec tail -$lines < [srv $srv_idx stdout]]
+    if {![string match $pattern $result]} {
+        error "assertion:expected message not found in log file: $pattern"
+    }
+}
+
+# wait for pattern to be found in server's stdout after certain line number
+proc wait_for_log_message {srv_idx pattern from_line maxtries delay} {
     set retry $maxtries
     set stdout [srv $srv_idx stdout]
     while {$retry} {
-        set result [exec tail -$last_lines < $stdout]
+        set result [exec tail +$from_line < $stdout]
         set result [split $result "\n"]
         foreach line $result {
             if {[string match $pattern $line]} {
@@ -114,7 +130,7 @@ proc wait_for_log_message {srv_idx pattern last_lines maxtries delay} {
         after $delay
     }
     if {$retry == 0} {
-        fail "log message of '$pattern' not found"
+        fail "log message of '$pattern' not found in $stdout after line: $from_line"
     }
 }
 
@@ -344,21 +360,26 @@ proc roundFloat f {
     format "%.10g" $f
 }
 
-proc find_available_port start {
-    for {set j $start} {$j < $start+1024} {incr j} {
-        if {[catch {set fd1 [socket 127.0.0.1 $j]}] &&
-            [catch {set fd2 [socket 127.0.0.1 [expr $j+10000]]}]} {
-            return $j
+set ::last_port_attempted 0
+proc find_available_port {start count} {
+    set port [expr $::last_port_attempted + 1]
+    for {set attempts 0} {$attempts < $count} {incr attempts} {
+        if {$port < $start || $port >= $start+$count} {
+            set port $start
+        }
+        if {[catch {set fd1 [socket 127.0.0.1 $port]}] &&
+            [catch {set fd2 [socket 127.0.0.1 [expr $port+10000]]}]} {
+            set ::last_port_attempted $port
+            return $port
         } else {
             catch {
                 close $fd1
                 close $fd2
             }
         }
+        incr port
     }
-    if {$j == $start+1024} {
-        error "Can't find a non busy port in the $start-[expr {$start+1023}] range."
-    }
+    error "Can't find a non busy port in the $start-[expr {$start+$count-1}] range."
 }
 
 # Test if TERM looks like to support colors
