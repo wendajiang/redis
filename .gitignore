@@ -27,6 +27,7 @@ src/nodes.conf
 deps/lua/src/lua
 deps/lua/src/luac
 deps/lua/src/liblua.a
+tests/tls/*
 .make-*
 .prerequisites
 *.dSYM
@@ -35,3 +36,6 @@ Makefile.dep
 .idea/*
 cmake/*
 cmake-build-debug/*
+.ccls
+.ccls-cache/*
+compile_commands.json
