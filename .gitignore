@@ -34,8 +34,8 @@ tests/tls/*
 Makefile.dep
 .vscode/*
 .idea/*
-cmake/*
-cmake-build-debug/*
 .ccls
 .ccls-cache/*
 compile_commands.json
+redis.code-workspace
+cmake-build-debug/*

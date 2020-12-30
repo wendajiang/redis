@@ -182,6 +182,7 @@ start_server {tags {"cli"}} {
         set tmpfile [write_tmpfile "from file"]
         assert_equal "OK" [run_cli_with_input_file $tmpfile set key]
         assert_equal "from file" [r get key]
+        file delete $tmpfile
     }
 
     test_nontty_cli "Status reply" {
@@ -215,6 +216,81 @@ start_server {tags {"cli"}} {
         set tmpfile [write_tmpfile "from file"]
         assert_equal "OK" [run_cli_with_input_file $tmpfile set key]
         assert_equal "from file" [r get key]
+        file delete $tmpfile
+    }
+
+    proc test_redis_cli_rdb_dump {} {
+        r flushdb
+
+        set dir [lindex [r config get dir] 1]
+
+        assert_equal "OK" [r debug populate 100000 key 1000]
+        catch {run_cli --rdb "$dir/cli.rdb"} output
+        assert_match {*Transfer finished with success*} $output
+
+        file delete "$dir/dump.rdb"
+        file rename "$dir/cli.rdb" "$dir/dump.rdb"
+
+        assert_equal "OK" [r set should-not-exist 1]
+        assert_equal "OK" [r debug reload nosave]
+        assert_equal {} [r get should-not-exist]
+    }
+
+    test "Dumping an RDB" {
+        # Disk-based master
+        assert_match "OK" [r config set repl-diskless-sync no]
+        test_redis_cli_rdb_dump
+
+        # Disk-less master
+        assert_match "OK" [r config set repl-diskless-sync yes]
+        assert_match "OK" [r config set repl-diskless-sync-delay 0]
+        test_redis_cli_rdb_dump
+    }
+
+    test "Connecting as a replica" {
+        set fd [open_cli "--replica"]
+        wait_for_condition 500 500 {
+            [string match {*slave0:*state=online*} [r info]]
+        } else {
+            fail "redis-cli --replica did not connect"
+        }
+
+        for {set i 0} {$i < 100} {incr i} {
+           r set test-key test-value-$i
+        }
+        r client kill type slave
+        catch {
+            assert_match {*SET*key-a*} [read_cli $fd]
+        }
+
+        close_cli $fd
+    }
+
+    test "Piping raw protocol" {
+        set cmds [tmpfile "cli_cmds"]
+        set cmds_fd [open $cmds "w"]
+
+        puts $cmds_fd [formatCommand select 9]
+        puts $cmds_fd [formatCommand del test-counter]
+
+        for {set i 0} {$i < 1000} {incr i} {
+            puts $cmds_fd [formatCommand incr test-counter]
+            puts $cmds_fd [formatCommand set large-key [string repeat "x" 20000]]
+        }
+
+        for {set i 0} {$i < 100} {incr i} {
+            puts $cmds_fd [formatCommand set very-large-key [string repeat "x" 512000]]
+        }
+        close $cmds_fd
+
+        set cli_fd [open_cli "--pipe" $cmds]
+        fconfigure $cli_fd -blocking true
+        set output [read_cli $cli_fd]
+
+        assert_equal {1000} [r get test-counter]
+        assert_match {*All data transferred*errors: 0*replies: 2102*} $output
+
+        file delete $cmds
     }
 
     proc test_redis_cli_rdb_dump {} {

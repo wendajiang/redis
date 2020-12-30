@@ -25,7 +25,7 @@ start_server [list overrides [list "dir" $server_path "dbfilename" "encodings.rd
 
 set server_path [tmpdir "server.rdb-startup-test"]
 
-start_server [list overrides [list "dir" $server_path]] {
+start_server [list overrides [list "dir" $server_path] keep_persistence true] {
     test {Server started empty with non-existing RDB file} {
         r debug digest
     } {0000000000000000000000000000000000000000}
@@ -33,13 +33,13 @@ start_server [list overrides [list "dir" $server_path]] {
     r save
 }
 
-start_server [list overrides [list "dir" $server_path]] {
+start_server [list overrides [list "dir" $server_path] keep_persistence true] {
     test {Server started empty with empty RDB file} {
         r debug digest
     } {0000000000000000000000000000000000000000}
 }
 
-start_server [list overrides [list "dir" $server_path]] {
+start_server [list overrides [list "dir" $server_path] keep_persistence true] {
     test {Test RDB stream encoding} {
         for {set j 0} {$j < 1000} {incr j} {
             if {rand() < 0.9} {
@@ -49,13 +49,22 @@ start_server [list overrides [list "dir" $server_path]] {
             }
         }
         r xgroup create stream mygroup 0
-        r xreadgroup GROUP mygroup Alice COUNT 1 STREAMS stream >
+        set records [r xreadgroup GROUP mygroup Alice COUNT 2 STREAMS stream >]
+        r xack stream mygroup [lindex [lindex [lindex [lindex $records 0] 1] 0] 0]
         set digest [r debug digest]
+        r config set sanitize-dump-payload no
         r debug reload
         set newdigest [r debug digest]
         assert {$digest eq $newdigest}
-        r del stream
     }
+    test {Test RDB stream encoding - sanitize dump} {
+        r config set sanitize-dump-payload yes
+        r debug reload
+        set newdigest [r debug digest]
+        assert {$digest eq $newdigest}
+    }
+    # delete the stream, maybe valgrind will find something
+    r del stream
 }
 
 # Helper function to start a server and kill it, just to check the error
@@ -64,7 +73,7 @@ set defaults {}
 proc start_server_and_kill_it {overrides code} {
     upvar defaults defaults srv srv server_path server_path
     set config [concat $defaults $overrides]
-    set srv [start_server [list overrides $config]]
+    set srv [start_server [list overrides $config keep_persistence true]]
     uplevel 1 $code
     kill_server $srv
 }
@@ -155,7 +164,7 @@ test {client freed during loading} {
         # 100mb of rdb, 100k keys will load in more than 1 second
         r debug populate 100000 key 1000
 
-        restart_server 0 false
+        restart_server 0 false false
 
         # make sure it's still loading
         assert_equal [s loading] 1
