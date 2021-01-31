@@ -101,6 +101,23 @@ jobs:
         ./runtest-cluster --tls
         ./runtest-cluster
 
+  test-ubuntu-io-threads:
+    runs-on: ubuntu-latest
+    if: github.repository == 'redis/redis'
+    timeout-minutes: 14400
+    steps:
+    - uses: actions/checkout@v2
+    - name: make
+      run: |
+        make
+    - name: test
+      run: |
+        sudo apt-get install tcl8.5 tcl-tls
+        ./runtest --config io-threads 4 --config io-threads-do-reads yes --accurate --verbose --tags network
+    - name: cluster tests
+      run: |
+        ./runtest-cluster --config io-threads 4 --config io-threads-do-reads yes
+
   test-valgrind:
     runs-on: ubuntu-latest
     if: github.repository == 'redis/redis'
@@ -218,3 +235,20 @@ jobs:
           git merge --no-edit upstream/unstable
           git push origin unstable
 
+  test-freebsd:
+    runs-on: macos-latest
+    if: github.repository == 'redis/redis'
+    timeout-minutes: 14400
+    steps:
+    - uses: actions/checkout@v2
+    - name: test
+      uses: vmactions/freebsd-vm@v0.1.0
+      with:
+        usesh: true
+        prepare: pkg install -y gmake lang/tcl85
+        run: |
+          gmake
+          ./runtest --accurate --verbose --no-latency
+          MAKE=gmake ./runtest-moduleapi --verbose
+          ./runtest-sentinel
+          ./runtest-cluster
