@@ -223,7 +223,6 @@ jobs:
                                 # to fetch all git depth right from the start)
 
           git remote add upstream https://github.com/redis/redis.git
-          git fetch upstream
 
           # Neither forget the -b opt,
           # the feature/x ref is ambiguous at this stage
@@ -232,6 +231,7 @@ jobs:
           # git push origin feature/x
 
           git checkout unstable
+          git fetch upstream
           git merge --no-edit upstream/unstable
           git push origin unstable
 
